@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Procedural Sand Drawing SFX</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --panel: rgba(20, 16, 12, .76);
+    --line: rgba(255,255,255,.12);
+    --text: #f5efe6;
+    --muted: rgba(245,239,230,.65);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #17110b; }
+  body {
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--text);
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  .hud {
+    position: fixed;
+    left: 18px;
+    top: 18px;
+    width: min(380px, calc(100vw - 36px));
+    padding: 15px 16px 14px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--panel);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 10px 40px rgba(0,0,0,.26);
+    pointer-events: none;
+  }
+  h1 { margin: 0 0 5px; font-size: 15px; font-weight: 700; letter-spacing: .01em; }
+  p { margin: 0; color: var(--muted); }
+  .meter {
+    height: 5px; margin-top: 12px; border-radius: 999px;
+    background: rgba(255,255,255,.10); overflow: hidden;
+  }
+  .meter > i {
+    display:block; height:100%; width:0%; border-radius:inherit;
+    background: rgba(255,255,255,.74);
+    transition: width 45ms linear;
+  }
+  .readout {
+    display:flex; gap:12px; margin-top:8px; color:var(--muted);
+    font-size:11px; font-variant-numeric: tabular-nums;
+  }
+  .readout span:first-child { min-width: 92px; }
+  .tip {
+    position: fixed; right: 16px; bottom: 14px;
+    color: rgba(255,255,255,.45); font-size: 11px;
+    pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <h1>Sand drawing sound</h1>
+  <p>Press and drag. Slow strokes stay soft and powdery; fast strokes become louder, brighter and more granular. Pen pressure also contributes when available.</p>
+  <div class="meter"><i id="meter"></i></div>
+  <div class="readout"><span id="speed">0 px/s</span><span id="texture">idle</span></div>
+</div>
+<div class="tip">Audio starts on first press · C clears</div>
+
+<script type="module">
+const canvas = document.querySelector('#c');
+const ctx = canvas.getContext('2d', { alpha: false });
+const meter = document.querySelector('#meter');
+const speedLabel = document.querySelector('#speed');
+const textureLabel = document.querySelector('#texture');
+
+let dpr = 1, W = 0, H = 0;
+let sandPattern = null;
+
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  paintSand();
+}
+addEventListener('resize', resize);
+
+function paintSand() {
+  const imgW = Math.max(1, Math.floor(W * dpr));
+  const imgH = Math.max(1, Math.floor(H * dpr));
+  const img = ctx.createImageData(imgW, imgH);
+  const data = img.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const n = (Math.random() - .5) * 18;
+    data[i]   = 205 + n;
+    data[i+1] = 162 + n * .72;
+    data[i+2] = 108 + n * .42;
+    data[i+3] = 255;
+  }
+  // Draw at device-pixel resolution, then return to CSS-pixel coordinates.
+  ctx.save();
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.putImageData(img, 0, 0);
+  ctx.restore();
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+
+resize();
+
+// ------------------------
+// Procedural audio engine
+// ------------------------
+let audio = null;
+let sandNode = null;
+let master = null;
+
+const workletSource = String.raw`
+class SandProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+
+    this.gateTarget = 0;
+    this.speedTarget = 0;
+    this.pressureTarget = 0;
+    this.turnTarget = 0;
+
+    this.gate = 0;
+    this.speed = 0;
+    this.pressure = 0;
+    this.turn = 0;
+
+    this.seedL = 0x12345678;
+    this.seedR = 0x87654321;
+
+    this.lpL = this.lpR = 0;
+    this.lp2L = this.lp2R = 0;
+    this.slowL = this.slowR = 0;
+    this.highLpL = this.highLpR = 0;
+
+    this.grainEnvL = this.grainEnvR = 0;
+    this.grainToneL = this.grainToneR = 0;
+    this.grainPhaseL = this.grainPhaseR = 0;
+    this.grainFreqL = this.grainFreqR = 2600;
+
+    this.crunchEnv = 0;
+    this.ridgePhase = 0;
+
+    this.port.onmessage = e => {
+      const d = e.data || {};
+      if (d.type === 'state') {
+        this.gateTarget = d.gate ? 1 : 0;
+
+        // While drawing, follow the gesture normally. On release, do NOT
+        // instantly zero the spectral state; let the last contact energy decay.
+        if (d.gate) {
+          this.speedTarget = Math.max(0, Math.min(1.25, d.speed || 0));
+          this.pressureTarget = Math.max(0, Math.min(1, d.pressure || 0));
+          this.turnTarget = Math.max(0, Math.min(1, d.turn || 0));
+        }
+      }
+    };
+  }
+
+  rnd(side) {
+    if (side === 0) {
+      let x = this.seedL | 0;
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+      this.seedL = x | 0;
+      return ((x >>> 0) / 4294967296) * 2 - 1;
+    } else {
+      let x = this.seedR | 0;
+      x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+      this.seedR = x | 0;
+      return ((x >>> 0) / 4294967296) * 2 - 1;
+    }
+  }
+
+  process(inputs, outputs) {
+    const out = outputs[0];
+    const L = out[0];
+    const R = out[1] || out[0];
+    const sr = sampleRate;
+
+    for (let i = 0; i < L.length; i++) {
+      // Contact should start promptly but fade like disturbed sand settling,
+      // rather than behaving like a hard audio gate.
+      const gCoef = this.gateTarget > this.gate ? 0.0045 : 0.00013;
+      this.gate += (this.gateTarget - this.gate) * gCoef;
+
+      if (this.gateTarget > 0.5) {
+        this.speed += (this.speedTarget - this.speed) * 0.0017;
+        this.pressure += (this.pressureTarget - this.pressure) * 0.0015;
+        this.turn += (this.turnTarget - this.turn) * 0.0014;
+      } else {
+        // Preserve the last timbre briefly, then relax it gradually.
+        this.speed *= 0.99970;
+        this.pressure *= 0.99976;
+        this.turn *= 0.99940;
+      }
+
+      const s = Math.max(0, Math.min(1, this.speed));
+      const p = Math.max(0, Math.min(1, this.pressure));
+
+      // Perceptual strength curve: quiet at crawl, quickly gains body,
+      // but does not explode in volume at high pointer speed.
+      const strength = Math.pow(s, 0.78);
+      const contact = this.gate * (0.055 + 0.70 * strength) * (0.92 + p * 0.08);
+
+      // Two decorrelated raw grain fields.
+      const nL = this.rnd(0);
+      const nR = this.rnd(1);
+
+      // Multi-scale one-pole decomposition.
+      // The cutoff rises with drawing speed, making fast strokes brighter.
+      const aBody = 0.010 + s * 0.032;
+      const aSoft = 0.0030 + s * 0.0075;
+      const aAir  = 0.11 + s * 0.10;
+
+      this.lpL += (nL - this.lpL) * aBody;
+      this.lpR += (nR - this.lpR) * aBody;
+      this.slowL += (nL - this.slowL) * aSoft;
+      this.slowR += (nR - this.slowR) * aSoft;
+      this.highLpL += (nL - this.highLpL) * aAir;
+      this.highLpR += (nR - this.highLpR) * aAir;
+
+      const bodyL = this.lpL - this.slowL;
+      const bodyR = this.lpR - this.slowR;
+      const airL = nL - this.highLpL;
+      const airR = nR - this.highLpR;
+
+      // Irregular sand-grain ticks. Density and brightness grow with speed.
+      const density = 20 + 520 * Math.pow(s, 1.35);
+      if (Math.random() < density / sr) {
+        this.grainEnvL = 0.10 + Math.random() * 0.38;
+        this.grainFreqL = 1200 + Math.random() * (1700 + s * 2300);
+      }
+      if (Math.random() < density / sr) {
+        this.grainEnvR = 0.10 + Math.random() * 0.38;
+        this.grainFreqR = 1200 + Math.random() * (1700 + s * 2300);
+      }
+
+      // Tiny resonant "grain" pings, strongly damped so they read as particles,
+      // not as musical sine tones.
+      this.grainPhaseL += this.grainFreqL / sr;
+      this.grainPhaseR += this.grainFreqR / sr;
+      if (this.grainPhaseL >= 1) this.grainPhaseL -= 1;
+      if (this.grainPhaseR >= 1) this.grainPhaseR -= 1;
+      const pingL = Math.sin(this.grainPhaseL * Math.PI * 2) * this.grainEnvL;
+      const pingR = Math.sin(this.grainPhaseR * Math.PI * 2) * this.grainEnvR;
+      const grainDecay = 0.978 - s * 0.004;
+      this.grainEnvL *= grainDecay;
+      this.grainEnvR *= grainDecay;
+
+      // Direction changes / sudden motion generate short extra crunches.
+      const crunchRate = 1 + 18 * this.turn * (0.2 + s);
+      if (Math.random() < crunchRate / sr) this.crunchEnv = .10 + Math.random() * .28;
+      const crunch = (nL + nR) * .5 * this.crunchEnv;
+      this.crunchEnv *= 0.986;
+
+      // Very subtle ridge rhythm: finger repeatedly catches/releases sand.
+      this.ridgePhase += (18 + 54 * s) / sr;
+      if (this.ridgePhase >= 1) this.ridgePhase -= 1;
+      const ridge = Math.max(0, Math.sin(this.ridgePhase * Math.PI * 2));
+      const ridgeMod = 0.97 + ridge * 0.03;
+
+      const softMix = 0.50 - s * 0.09;
+      const airMix = 0.007 + s * 0.025;
+      const grainMix = 0.0025 + s * 0.010;
+
+      let yL = bodyL * softMix + airL * airMix + pingL * grainMix + crunch * 0.018;
+      let yR = bodyR * softMix + airR * airMix + pingR * grainMix + crunch * 0.018;
+
+      // Gentle saturation rounds the harshest white-noise peaks.
+      yL = Math.tanh(yL * 1.05) * contact * ridgeMod;
+      yR = Math.tanh(yR * 1.05) * contact * ridgeMod;
+
+      // Narrow stereo image, appropriate for close-up contact sound.
+      const mid = (yL + yR) * .5;
+      L[i] = mid * .72 + yL * .28;
+      R[i] = mid * .72 + yR * .28;
+    }
+    return true;
+  }
+}
+registerProcessor('sand-processor', SandProcessor);
+`;
+
+async function ensureAudio() {
+  if (audio) {
+    if (audio.state === 'suspended') await audio.resume();
+    return;
+  }
+  audio = new AudioContext({ latencyHint: 'interactive' });
+  const blob = new Blob([workletSource], { type: 'text/javascript' });
+  const url = URL.createObjectURL(blob);
+  await audio.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  sandNode = new AudioWorkletNode(audio, 'sand-processor', {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [2]
+  });
+
+  // Small finishing chain. High-pass removes DC / overly soft rumble.
+  const hp = new BiquadFilterNode(audio, { type: 'highpass', frequency: 90, Q: .7 });
+  const presence = new BiquadFilterNode(audio, {
+    type: 'peaking', frequency: 2200, Q: .75, gain: -4.8
+  });
+  const compressor = new DynamicsCompressorNode(audio, {
+    threshold: -18, knee: 16, ratio: 2.2, attack: .004, release: .09
+  });
+  master = new GainNode(audio, { gain: 0.34 });
+
+  const soften = new BiquadFilterNode(audio, {
+    type: 'lowpass', frequency: 4800, Q: .42
+  });
+
+  sandNode.connect(hp).connect(presence).connect(soften).connect(compressor).connect(master).connect(audio.destination);
+}
+
+// ------------------------
+// Drawing + gesture analysis
+// ------------------------
+let drawing = false;
+let pointerId = -1;
+let lastX = 0, lastY = 0, lastT = 0;
+let lastVX = 0, lastVY = 0;
+let filteredSpeed = 0;
+let displayedSpeed = 0;
+
+function normSpeed(pxPerSec) {
+  // 40 px/s is a deliberate crawl; around 1100 px/s reaches full intensity.
+  return Math.max(0, Math.min(1, (pxPerSec - 24) / 1080));
+}
+
+function sendState(gate, speed, pressure, turn) {
+  if (!sandNode) return;
+  sandNode.port.postMessage({ type:'state', gate, speed, pressure, turn });
+}
+
+function begin(e) {
+  if (drawing) return;
+  ensureAudio().then(() => {
+    drawing = true;
+    pointerId = e.pointerId;
+    canvas.setPointerCapture?.(e.pointerId);
+    lastX = e.clientX; lastY = e.clientY;
+    lastT = performance.now();
+    lastVX = lastVY = 0;
+    filteredSpeed = 0;
+    sendState(1, 0.025, e.pressure || 0, 0);
+    drawDot(lastX, lastY);
+  });
+}
+
+function move(e) {
+  if (!drawing || e.pointerId !== pointerId) return;
+  const now = performance.now();
+  const dt = Math.max(1, now - lastT) / 1000;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  const dist = Math.hypot(dx, dy);
+  const rawSpeed = dist / dt;
+
+  // Event-rate independent smoothing.
+  const blend = 1 - Math.exp(-dt * 18);
+  filteredSpeed += (rawSpeed - filteredSpeed) * blend;
+
+  const vx = dx / dt, vy = dy / dt;
+  const vmag = Math.hypot(vx, vy);
+  const oldMag = Math.hypot(lastVX, lastVY);
+  let turn = 0;
+  if (vmag > 20 && oldMag > 20) {
+    const dot = (vx * lastVX + vy * lastVY) / (vmag * oldMag);
+    turn = Math.max(0, Math.min(1, (1 - dot) * .72));
+  }
+  const accel = Math.hypot(vx - lastVX, vy - lastVY) / Math.max(3000, vmag * 8);
+  turn = Math.min(1, turn + accel * .35);
+
+  // Mouse reports pressure≈0.5 while pressed in most browsers.
+  // Treat pen pressure as useful only when it has a meaningful range.
+  let pressure = e.pointerType === 'pen' ? e.pressure : 0;
+  const s = normSpeed(filteredSpeed);
+
+  sendState(1, s, pressure, turn);
+  drawGroove(lastX, lastY, e.clientX, e.clientY, s);
+
+  displayedSpeed = filteredSpeed;
+  meter.style.width = `${Math.min(100, s * 100)}%`;
+  speedLabel.textContent = `${Math.round(filteredSpeed)} px/s`;
+  textureLabel.textContent =
+    s < .14 ? 'soft drag' :
+    s < .42 ? 'dry scrape' :
+    s < .72 ? 'grainy' : 'hard scrape';
+
+  lastX = e.clientX; lastY = e.clientY; lastT = now;
+  lastVX = vx; lastVY = vy;
+}
+
+function end(e) {
+  if (!drawing || (e && e.pointerId !== pointerId)) return;
+  drawing = false;
+  // Only release contact. The worklet intentionally retains and decays
+  // the final speed/timbre state so the sound has a soft physical tail.
+  sendState(0, 0, 0, 0);
+  pointerId = -1;
+  filteredSpeed = 0;
+  meter.style.width = '0%';
+  speedLabel.textContent = '0 px/s';
+  textureLabel.textContent = 'idle';
+}
+
+canvas.addEventListener('pointerdown', begin);
+canvas.addEventListener('pointermove', move);
+canvas.addEventListener('pointerup', end);
+canvas.addEventListener('pointercancel', end);
+canvas.addEventListener('lostpointercapture', () => drawing && end());
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+addEventListener('keydown', e => {
+  if (e.key.toLowerCase() === 'c') paintSand();
+});
+
+function drawDot(x, y) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(116,79,42,.25)';
+  ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawGroove(x0,y0,x1,y1,s) {
+  const width = 8 + s * 3.5;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // dark compressed trench
+  ctx.strokeStyle = `rgba(105,70,38,${0.24 + s*.08})`;
+  ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+
+  // one raised sunlit edge
+  const dx = x1-x0, dy = y1-y0;
+  const len = Math.max(1, Math.hypot(dx,dy));
+  const ox = -dy/len * 2.2, oy = dx/len * 2.2;
+  ctx.strokeStyle = `rgba(245,207,151,${0.15 + s*.04})`;
+  ctx.lineWidth = 2.1;
+  ctx.beginPath(); ctx.moveTo(x0+ox,y0+oy); ctx.lineTo(x1+ox,y1+oy); ctx.stroke();
+
+  // opposite contact shadow
+  ctx.strokeStyle = `rgba(71,45,24,${0.12 + s*.05})`;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath(); ctx.moveTo(x0-ox,y0-oy); ctx.lineTo(x1-ox,y1-oy); ctx.stroke();
+
+  ctx.restore();
+}
+</script>
+</body>
+</html>

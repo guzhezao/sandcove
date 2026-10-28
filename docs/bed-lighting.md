@@ -1,0 +1,11 @@
+# Bed-space horizon lighting
+
+Macro illumination runs on the simulation grid before drawing, rather than repeating a heightfield raymarch at every screen pixel. The surface bilinearly reconstructs direct visibility and sky visibility; submillimeter grain normals, minerals, and specular response remain per fragment. The existing direct-light sample positions and penumbra approximation are retained. This trades screen-space shadow evaluation for grid-scale interpolation, not additional geometric detail.
+
+Sky occlusion takes the maximum horizon in eight directions over six distances (one through 32 grid cells). Horizons are measured above the local tangent, preventing a uniformly tilted plane from being treated as a cavity. Squared horizon sines approximate cosine-weighted missing sky. This is a bounded heightfield approximation, not full global illumination. No temporal noise or accumulation is used, so stationary lighting does not shimmer or trail a stroke.
+
+The cache is invalidated by a monotonic solver revision and light angle, never by ping-pong buffer index alone: two substeps return to the same buffer while changing its contents. Reset also advances the revision. Camera and viewport changes do not invalidate bed-space lighting. Simulation steps currently advance revisions even when a bed is settled; avoiding those dispatches would require a separate activity reduction.
+
+The shipped scene now uses one fixed authored light angle (`-0.8` radians). The user-facing light-turn control and keyboard shortcut were removed, so normal runtime invalidation comes from bed revisions rather than interactive light changes. `BedLighting` still accepts an angle explicitly because its cache behavior and directional response are tested independently of the renderer.
+
+At 512 squared the cache occupies 4 MiB. Each refresh uses 62 bilinear height probes per cell; the old fragment path used 18 per screen pixel. Surface fragments now fetch four cached lighting values instead. This bounds expensive lighting work independently of DPR, but can cost more at small viewports or low simulation-to-screen resolution ratios. Frame-time gains have not been benchmarked; GPU tests validate planes, trenches, cache invalidation, shader execution, and offscreen image output. Visual acceptance remains manual.

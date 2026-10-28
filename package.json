@@ -1,0 +1,36 @@
+{
+  "name": "sandcove",
+  "private": true,
+  "version": "19.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:gpu": "vitest run --config vitest.gpu.config.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.5.1",
+    "@webgpu/types": "^0.1.72",
+    "eslint": "^10.10.0",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.70.0",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.0",
+    "webgpu": "^0.6.0"
+  },
+  "license": "GPL-3.0-only",
+  "description": "A WebGPU beach sandbox: sculpt sandcastles, dig channels, and watch the tide reshape your beach.",
+  "homepage": "https://mqr0sn1ljjxnu.space.mcode.cn/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/guzhezao/sandcove.git"
+  },
+  "engines": {
+    "node": "^24.0.0 || >=26.0.0"
+  }
+}
