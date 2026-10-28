@@ -4,11 +4,11 @@
 
 [在线试玩 ↗](https://mqr0sn1ljjxnu.space.mcode.cn/) · [本地运行](#本地运行) · [来源与许可](#来源与许可)
 
-![沙滩小筑 V19.1：海滩、沙堡与工具栏](docs/images/sandcove-v19.1.png)
+![沙滩小筑 V19.1：海滩、沙堡与工具栏](docs/images/sandcove-v19.1.jpg)
 
 挖一条沟，水会顺着地形流过去；堆起沙墙，让它挡住海浪；再发动海啸，看自己搭的沙堡能留下多少。这里没有分数，你可以慢慢造，也可以随时重来。
 
-这是一次以 AI 制作游戏为目标的持续打磨：基于开源 **Sandboard**，由 **MiniMax M3.1 Flash** 完成新增沙地工具、水流与玩法主体，再通过 **Codex 多轮修改**完善交互、冲刷、镜头、海啸、人物与声音。当前版本为 **V19.1**，并非一次提示词生成。
+基于开源 **Sandboard**，逐步扩展沙地工具、水流模拟、冲刷、海啸、人物与声音，形成当前的 **V19.1** 海滩沙盒。
 
 ## 在海滩上做什么
 
@@ -73,4 +73,4 @@ GPU 测试需要可用的 WebGPU / Dawn 适配器，普通无 GPU 的 CI 环境�
 
 ---
 
-**SANDCOVE** is a WebGPU beach sandbox for sculpting sandcastles, digging channels, and watching water reshape the terrain. Built on Sandboard and developed through iterative AI-assisted work with MiniMax M3.1 Flash and Codex. Requires a WebGPU-capable browser; licensed under GPL-3.0-only.
+**SANDCOVE** is a WebGPU beach sandbox for sculpting sandcastles, digging channels, and watching water reshape the terrain. Built on Sandboard, with water simulation, terrain erosion, and interactive beach life. Requires a WebGPU-capable browser; licensed under GPL-3.0-only.
